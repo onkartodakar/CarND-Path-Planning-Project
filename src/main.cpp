@@ -164,6 +164,15 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+// Get lane id from d
+int getLaneId(double d){
+	return int(floor(d/4));
+}
+
+double Normalise(double x) {
+  return 2.0f / (1.0f + exp(-x)) - 1.0f;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -249,12 +258,15 @@ int main() {
 			}
 			
 			bool too_close =false;
+			double closest_speed = 49.5;
 			
 			//find ref_v to use
 			
 			for(int i=0; i < sensor_fusion.size(); i++){
 				//car is in my lane
 				float d = sensor_fusion[i][6];
+				float laneId = getLaneId(d);
+				//if( lane == laneId) {
 				if( d < (2+4*lane+2)  && d > (2+4*lane-2)){
 					double vx = sensor_fusion[i][3];
 					double vy = sensor_fusion[i][4];
@@ -267,16 +279,123 @@ int main() {
 					if((check_car_s > car_s) && ((check_car_s - car_s) < 30)){
 						//ref_vel = 29.5;
 						too_close = true;
+						closest_speed = check_speed;
 						
-						if(lane>0){
+						/*if(lane>0){
 							lane = 0;
-						}
+						}*/
 					}
 				}
 			}
 
 			if(too_close){
-				ref_vel -= 0.224;
+				//ref_vel -= 0.224;
+				
+				//Average lane speeds
+				vector<double> lane_speed = {0.0, 0.0, 0.0};
+				vector<int> cars_in_lane = {0, 0, 0};
+				
+				//Track cars by lane
+				vector<vector<int>> carID_by_lane(3);
+				
+				for(int i=0; i < sensor_fusion.size(); i++){
+					float other_car_d = sensor_fusion[i][6];
+					int other_car_laneId = getLaneId(other_car_d);
+					
+					if(other_car_laneId < 0 || other_car_laneId > 2)
+						continue;
+					
+					//Track cars in each lane - use to calculate buffer for lane change
+					carID_by_lane[other_car_laneId].push_back(i);
+					
+					double other_car_vx = sensor_fusion[i][3];
+					double other_car_vy = sensor_fusion[i][4];
+					double other_car_speed = sqrt(other_car_vx*other_car_vx + other_car_vy*other_car_vy);
+					
+					lane_speed[other_car_laneId] += other_car_speed*2.23694;
+					cars_in_lane[other_car_laneId] += 1;
+				}
+				
+				for(int i = 0; i < lane_speed.size(); i++){
+					if(cars_in_lane[i] == 0)
+						lane_speed[i] = 49.5;
+					else
+						lane_speed[i] = lane_speed[i]/cars_in_lane[i];
+				}
+				
+				//Target lanes to be considered for lane change
+				vector<int> target_lanes;
+				if(lane == 0)
+					target_lanes = {0,1};
+				else if(lane == 1)
+					target_lanes = {0, 1, 2};
+				else
+					target_lanes = {1, 2};
+				
+				int best_lane = lane;
+				double best_cost = numeric_limits<double>::max();
+				
+				for(int check_lane : target_lanes){
+					double cost = 0;
+					
+					//Penalize lane change
+					if(check_lane != lane)
+						cost+= 1000;
+					
+					//Penalize slower lanes
+					double avg_speed = lane_speed[check_lane];
+					cost += Normalise(2.0*(avg_speed -ref_vel/avg_speed)) * 1000;
+					
+					
+					//Penalize unsafe lane changes
+					double nearest_front_s = 99999;
+					double nearest_behind_s = 99999;
+					
+					for(int i=0; i<carID_by_lane[check_lane].size(); i++){
+						int index = carID_by_lane[check_lane][i];
+						double lane_vx = sensor_fusion[index][3];
+						double lane_vy = sensor_fusion[index][4];
+						double lane_check_speed = sqrt(lane_vx*lane_vx + lane_vy*lane_vy);
+						double lane_car_s = sensor_fusion[index][5];
+					
+						//if using previous points project s value outwards
+						lane_car_s += ((double)prev_size*0.02*lane_check_speed);
+					
+						if(lane_car_s > car_s){
+							if(nearest_front_s > (lane_car_s - car_s))
+								nearest_front_s = (lane_car_s - car_s);
+						} else {
+							if(nearest_behind_s > (car_s - lane_car_s))
+								nearest_behind_s = (car_s - lane_car_s);
+						}
+					}
+					
+					//Penalize cutting across other cars heavily
+					double buffer = 5;
+					
+					if(nearest_behind_s < buffer || nearest_front_s < buffer)
+						cost += pow(10,5);
+					
+					//Penalize lane based on how free the lane is
+					cost += (100/nearest_front_s)*2000;
+					
+					
+					//Prefer center lane
+					if(check_lane != 1)
+						cost +=1000;
+					
+					if(cost < best_cost){
+						best_lane = check_lane;
+						best_cost = cost;
+					}
+				}
+					
+					if(best_lane ==lane && (ref_vel > lane_speed[lane] || ref_vel > closest_speed))
+						ref_vel -= 0.224;
+					
+					//Change Lanes
+					lane = best_lane;
+					
 			}else if(ref_vel < 49.5){
 				ref_vel += 0.224;
 			}
